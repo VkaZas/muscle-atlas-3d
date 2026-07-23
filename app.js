@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/DRACOLoader.js';
+import { LoopSubdivision } from 'three/addons/LoopSubdivision.js';
 import { MUSC, EX, GROUPS, REGION_CAM, SH_ZONES, SH_REDFLAGS, RLABEL } from './data.js';
 
 // ---------- 颜色（与 CSS 变量对应，供 3D 用固定值）----------
@@ -168,6 +169,31 @@ function clearActive(){
 
 const ROLE_AMP = { primary:1.0, synergist:0.62, stabilizer:0.34 };
 
+// 懒惰 + 异步细分：肌肉首次高亮时排队，按每帧时间预算逐块 Loop 细分并缓存，
+// 既磨掉低模棱面又不阻塞主线程。
+let _smoothQueue = [], _smoothing = false;
+function queueSmooth(meshes){
+  for(const m of meshes){
+    if(m.userData._smoothed || m.userData._queued) continue;
+    m.userData._queued = true; _smoothQueue.push(m);
+  }
+  if(!_smoothing){ _smoothing = true; requestAnimationFrame(processSmooth); }
+}
+function smoothMeshNow(m){
+  m.userData._queued = false;
+  if(m.userData._smoothed) return;
+  m.userData._smoothed = true;
+  try {
+    m.geometry = LoopSubdivision.modify(m.geometry, 1, { split:false, preserveEdges:false, uvSmooth:false });
+    m.geometry.computeVertexNormals();
+  } catch(e){ /* 退化网格保持原样 */ }
+}
+function processSmooth(){
+  const start = performance.now();
+  while(_smoothQueue.length && performance.now()-start < 10){ smoothMeshNow(_smoothQueue.shift()); }
+  if(_smoothQueue.length) requestAnimationFrame(processSmooth); else _smoothing = false;
+}
+
 function applyRoles(roleMap){ // roleMap: gid -> role
   detachPivots();
   const keys = Object.keys(roleMap);
@@ -184,6 +210,7 @@ function applyRoles(roleMap){ // roleMap: gid -> role
   for(const gid in roleMap){
     const role = roleMap[gid], recs = groupIndex[gid] || [], col = ROLE_COLOR[role];
     recs.forEach(r=>{ r.mesh.material = new THREE.MeshStandardMaterial({ color:col, roughness:0.5, metalness:0.05, emissive:col, emissiveIntensity:0.12, side:THREE.DoubleSide }); });
+    queueSmooth(recs.map(r=>r.mesh));
     // 按左右（含中线）分组，避免两侧对称肌肉朝中线塌陷
     const sides = { L:[], R:[], C:[] };
     recs.forEach(r=>{ const x=r.center.x; (x < -0.03 ? sides.L : x > 0.03 ? sides.R : sides.C).push(r); });
