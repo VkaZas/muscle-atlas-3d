@@ -109,7 +109,7 @@ function loadModel(){
     // 默认选中一个动作
     selectEx('bench');
   },
-  (p)=>{ if(p.total){ $('#loadpct').textContent = Math.round(p.loaded/p.total*100)+'%'; } },
+  (p)=>{ if(p.total){ $('#loadpct').textContent = Math.min(100, Math.round(p.loaded/p.total*100))+'%'; } },
   (err)=>{ console.error(err); $('#loadpct').textContent = '加载失败'; });
 }
 
