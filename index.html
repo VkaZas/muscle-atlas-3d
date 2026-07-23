@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>肌肉图谱 3D · 动作解剖与肩痛定位</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div class="lz">正在加载真实解剖模型 <span id="loadpct">0%</span></div>
+  <div class="lz-sub">首次约 8MB，稍等片刻</div>
+</div>
+
+<!-- 顶栏 -->
+<header class="top">
+  <div class="brand">
+    <h1>肌肉图谱 <span>3D</span></h1>
+    <div class="sub">Z-ANATOMY · KINESIOLOGY · SHOULDER TRIAGE</div>
+  </div>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-mod="ex" aria-selected="true">动作解剖</button>
+    <button class="tab" role="tab" data-mod="sh" aria-selected="false">肩痛定位</button>
+  </div>
+  <button class="icon-btn" id="themeBtn" aria-label="切换主题"></button>
+</header>
+
+<!-- 左侧面板 -->
+<aside class="panel" id="panelEx">
+  <div class="p-sec">
+    <div class="eyebrow">动作库</div>
+    <div class="ex-list" id="exList"></div>
+  </div>
+</aside>
+
+<aside class="panel hidden" id="panelSh">
+  <div class="p-sec">
+    <div class="disclaim">
+      <b>仅供教育参考，不能替代医生诊断。</b> 点下方最接近你疼痛的部位，模型会高亮对应结构。
+    </div>
+    <div class="eyebrow">点击疼痛部位</div>
+    <div class="zone-list" id="zoneList"></div>
+    <div class="redflag">
+      <div class="rf-h">出现以下情况请就医</div>
+      <ul id="shRed"></ul>
+    </div>
+  </div>
+</aside>
+
+<!-- 右侧详情 -->
+<section class="detail" id="detailWrap">
+  <div class="detail-inner" id="exDetail" style="display:block"></div>
+  <div class="detail-inner" id="shDetail" style="display:none">
+    <div class="empty">
+      <div class="emoji">🎯</div>
+      <p>在左侧选择一个疼痛部位，<br>这里显示结构、可能问题与应对建议。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 底部工具条 -->
+<div class="toolbar">
+  <div class="seg">
+    <button id="btnFront">正面</button>
+    <button id="btnBack">背面</button>
+    <button id="btnReset">全身</button>
+  </div>
+  <button class="tgl" id="tglBones">显示骨骼</button>
+  <div class="legend">
+    <span><i style="background:#d6392f"></i>主动</span>
+    <span><i style="background:#e08a3c"></i>协同</span>
+    <span><i style="background:#d8b23f"></i>稳定</span>
+  </div>
+</div>
+
+<div class="credit">解剖模型 © <a href="https://www.z-anatomy.com/" target="_blank" rel="noopener">Z-Anatomy</a> / <a href="https://github.com/hpfrei/body-anatomy-3d-viewer" target="_blank" rel="noopener">hpfrei</a> · CC BY-SA 4.0</div>
+
+<script type="importmap">
+{ "imports": { "three": "./libs/three.module.js", "three/addons/": "./libs/" } }
+</script>
+<script type="module" src="app.js"></script>
+<script>
+// module 面板切换时同步右侧详情显隐
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  const ex = t.dataset.mod==='ex';
+  document.getElementById('exDetail').style.display = ex?'block':'none';
+  document.getElementById('shDetail').style.display = ex?'none':'block';
+}));
+</script>
+</body>
+</html>
