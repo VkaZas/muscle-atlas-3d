@@ -71,8 +71,8 @@ function loadModel(){
   const draco = new DRACOLoader();
   draco.setDecoderPath('./libs/draco/');
   loader.setDRACOLoader(draco);
-  baseMuscleMat = new THREE.MeshStandardMaterial({ color:MUSCLE_BASE, roughness:0.72, metalness:0.02 });
-  boneMat = new THREE.MeshStandardMaterial({ color:BONE_COLOR, roughness:0.9, metalness:0, transparent:true, opacity:0.28, depthWrite:false });
+  baseMuscleMat = new THREE.MeshStandardMaterial({ color:MUSCLE_BASE, roughness:0.72, metalness:0.02, side:THREE.DoubleSide, flatShading:false });
+  boneMat = new THREE.MeshStandardMaterial({ color:BONE_COLOR, roughness:0.9, metalness:0, transparent:true, opacity:0.28, depthWrite:false, side:THREE.DoubleSide });
 
   loader.load('./body.glb', (gltf)=>{
     modelRoot = gltf.scene;
@@ -127,20 +127,12 @@ function matchGroup(nodeName){
   return null;
 }
 
-// 预处理肌肉网格：记录静息顶点、局部长轴、中心，用于收缩形变
+// 预处理肌肉网格：记录几何中心（用于朝向校准与左右分组）
 function prepMuscle(mesh, gid){
   const geom = mesh.geometry;
   if(!geom.boundingBox) geom.computeBoundingBox();
-  const bb = geom.boundingBox;
-  const center = new THREE.Vector3(); bb.getCenter(center);
-  const size = new THREE.Vector3(); bb.getSize(size);
-  // 长轴 = 局部包围盒最长维度
-  let along = new THREE.Vector3(1,0,0);
-  if(size.y >= size.x && size.y >= size.z) along.set(0,1,0);
-  else if(size.z >= size.x && size.z >= size.y) along.set(0,0,1);
-  const pos = geom.attributes.position;
-  const rest = new Float32Array(pos.array); // 拷贝静息态
-  return { mesh, groupId:gid, rest, center, along, deforming:false };
+  const center = new THREE.Vector3(); geom.boundingBox.getCenter(center);
+  return { mesh, groupId:gid, center };
 }
 
 // 校准朝向：脸/胸在 +Z 还是 -Z。用胸大肌相对模型中心的 z 判断
@@ -155,82 +147,79 @@ function calibrateOrientation(){
 }
 
 // ============================================================== HIGHLIGHT ====
+// 收缩用「整块缩放」实现：每块肌肉（按左右分组）挂到朝向其长轴的枢轴上，
+// 缩放枢轴 = 沿长轴缩短 + 垂直增粗。整块一起动，低模也不撕裂、不出尖刺。
+function detachPivots(){
+  if(!active || !active.pivots) return;
+  active.pivots.forEach(p=>{
+    p.pivot.scale.set(1,1,1); p.pivot.updateMatrixWorld(true);
+    [...p.pivot.children].forEach(m=> modelRoot.attach(m));
+    scene.remove(p.pivot);
+  });
+}
 function clearActive(){
+  detachPivots();
   muscleMeshes.forEach(r=>{
-    r.deforming = false;
-    restoreGeom(r);
-    if(r.mesh.material !== baseMuscleMat && r.mesh.material !== boneMat){
-      r.mesh.material.dispose?.();
-    }
-    r.mesh.material = baseMuscleMat;
-    r.mesh.visible = true;
+    if(r.mesh.material !== baseMuscleMat && r.mesh.material !== boneMat) r.mesh.material.dispose?.();
+    r.mesh.material = baseMuscleMat; r.mesh.visible = true;
   });
   active = null;
 }
 
-function restoreGeom(r){
-  const pos = r.mesh.geometry.attributes.position;
-  if(pos.array.length === r.rest.length){ pos.array.set(r.rest); pos.needsUpdate = true; r.mesh.geometry.computeVertexNormals(); }
-}
+const ROLE_AMP = { primary:1.0, synergist:0.62, stabilizer:0.34 };
 
 function applyRoles(roleMap){ // roleMap: gid -> role
-  // 未参与的肌肉调暗；若高亮含深层肌肉，则把非活动肌肉变半透明让深层可见
-  const anyRole = Object.keys(roleMap).length>0;
-  const hasDeep = Object.keys(roleMap).some(g=> MUSC[g]?.deep);
-  const dim = hasDeep
-    ? new THREE.MeshStandardMaterial({ color:MUSCLE_DIM, roughness:0.82, metalness:0, transparent:true, opacity:0.16, depthWrite:false })
-    : new THREE.MeshStandardMaterial({ color:anyRole?MUSCLE_DIM:MUSCLE_BASE, roughness:0.82, metalness:0 });
-  const recs = [];
-  muscleMeshes.forEach(r=>{
-    const role = roleMap[r.groupId];
-    if(role){
-      const col = ROLE_COLOR[role];
-      const mat = new THREE.MeshStandardMaterial({ color:col, roughness:0.55, metalness:0.05, emissive:col, emissiveIntensity:0.12 });
-      r.mesh.material = mat; r.mesh.visible = true; r.deforming = true; r.role = role;
-      recs.push(r);
-    } else {
-      r.mesh.material = dim; r.mesh.visible = true; r.deforming = false; r.role = null;
-      restoreGeom(r);
-    }
-  });
-  active = { records:recs, t:0, dir:1, playing:true };
+  detachPivots();
+  const keys = Object.keys(roleMap);
+  const anyRole = keys.length > 0;
+  // 仅在「聚焦少数深层结构」时透视（肩痛模块/单块深层肌），复合动作保持实体
+  const xray = keys.length <= 3 && keys.some(g=> MUSC[g]?.deep);
+  const dimMat = xray
+    ? new THREE.MeshStandardMaterial({ color:MUSCLE_DIM, roughness:0.85, transparent:true, opacity:0.12, depthWrite:false })
+    : new THREE.MeshStandardMaterial({ color:anyRole?MUSCLE_DIM:MUSCLE_BASE, roughness:0.85, side:THREE.DoubleSide });
+  muscleMeshes.forEach(r=>{ r.mesh.material = dimMat; r.mesh.visible = true; });
+
+  const pivots = [];
+  const tmpBox = new THREE.Box3(), tmpC = new THREE.Vector3(), tmpS = new THREE.Vector3();
+  for(const gid in roleMap){
+    const role = roleMap[gid], recs = groupIndex[gid] || [], col = ROLE_COLOR[role];
+    recs.forEach(r=>{ r.mesh.material = new THREE.MeshStandardMaterial({ color:col, roughness:0.5, metalness:0.05, emissive:col, emissiveIntensity:0.12, side:THREE.DoubleSide }); });
+    // 按左右（含中线）分组，避免两侧对称肌肉朝中线塌陷
+    const sides = { L:[], R:[], C:[] };
+    recs.forEach(r=>{ const x=r.center.x; (x < -0.03 ? sides.L : x > 0.03 ? sides.R : sides.C).push(r); });
+    ['L','R','C'].forEach(k=>{
+      const rs = sides[k]; if(!rs.length) return;
+      tmpBox.makeEmpty(); rs.forEach(r=> tmpBox.expandByObject(r.mesh));
+      if(tmpBox.isEmpty()) return;
+      tmpBox.getCenter(tmpC); tmpBox.getSize(tmpS);
+      // 长轴 = 世界包围盒最长维度（0=x,1=y,2=z）。轴与世界对齐，缩放不产生剪切
+      let axisIdx = 0;
+      if(tmpS.y>=tmpS.x && tmpS.y>=tmpS.z) axisIdx = 1;
+      else if(tmpS.z>=tmpS.x && tmpS.z>=tmpS.y) axisIdx = 2;
+      const pivot = new THREE.Group();
+      pivot.position.copy(tmpC);
+      scene.add(pivot);
+      rs.forEach(r=> pivot.attach(r.mesh)); // 保持世界位置地挂载
+      pivots.push({ pivot, role, axisIdx });
+    });
+  }
+  active = { pivots, t:0, dir:1, playing:true };
 }
 
-const ROLE_AMP = { primary:1.0, synergist:0.6, stabilizer:0.32 };
-
+const DEF_K = 0.13, DEF_T = 0.06; // 整块：沿长轴缩短 / 垂直增粗（温和）
 function updateDeform(dt){
   if(!active) return;
   if(active.playing){
-    const speed = 0.5;
-    active.t += active.dir * dt * speed;
+    active.t += active.dir * dt * 0.5;
     if(active.t >= 1){ active.t = 1; active.dir = -1; }
     else if(active.t <= 0){ active.t = 0; active.dir = 1; }
   }
-  const tri = active.t;                 // 0..1 三角波
-  const act = easeInOut(tri);
-  const _v = new THREE.Vector3(), _p = new THREE.Vector3(), _perp = new THREE.Vector3();
-  active.records.forEach(r=>{
-    const amp = ROLE_AMP[r.role] || 0.4;
-    const a = act * amp;
-    const K = 0.20 * a;   // 沿长轴缩短
-    const T = 0.16 * a;   // 垂直增粗
-    const pos = r.mesh.geometry.attributes.position;
-    if(pos.array.length !== r.rest.length) return;
-    const arr = pos.array, rest = r.rest, c = r.center, ax = r.along;
-    for(let i=0;i<arr.length;i+=3){
-      _p.set(rest[i]-c.x, rest[i+1]-c.y, rest[i+2]-c.z);
-      const comp = _p.dot(ax);
-      _perp.copy(_p).addScaledVector(ax, -comp);
-      // 收缩：沿轴分量缩短、垂直分量放大
-      _v.copy(ax).multiplyScalar(comp*(1-K)).add(_perp.multiplyScalar(1+T));
-      arr[i]   = c.x + _v.x;
-      arr[i+1] = c.y + _v.y;
-      arr[i+2] = c.z + _v.z;
-    }
-    pos.needsUpdate = true;
-    r.mesh.geometry.computeVertexNormals();
-    // 发光脉冲
-    if(r.mesh.material.emissive){ r.mesh.material.emissiveIntensity = 0.12 + 0.55*a; }
+  const a0 = easeInOut(active.t);
+  active.pivots.forEach(p=>{
+    const a = a0 * (ROLE_AMP[p.role] || 0.4);
+    const shorten = 1 - DEF_K*a, thick = 1 + DEF_T*a;
+    p.pivot.scale.set(p.axisIdx===0?shorten:thick, p.axisIdx===1?shorten:thick, p.axisIdx===2?shorten:thick);
+    for(const m of p.pivot.children){ if(m.material?.emissive) m.material.emissiveIntensity = 0.1 + 0.5*a; }
   });
   // 相位文字
   const concentric = active.dir > 0;
@@ -411,11 +400,11 @@ function updatePlayIcon2(){
 }
 function soloHighlight(gid){
   if(!active) return;
-  active.records.forEach(r=>{
-    const on = r.groupId===gid;
-    if(r.mesh.material.emissive){ r.mesh.material.emissiveIntensity = on?0.6:0.05; r.mesh.material.opacity = 1; }
-    r.mesh.material.transparent = !on; r.mesh.material.opacity = on?1:0.25;
-  });
+  active.pivots.forEach(p=> p.pivot.children.forEach(m=>{
+    const on = m.userData._gid === gid;
+    if(m.material?.emissive) m.material.emissiveIntensity = on?0.6:0.05;
+    m.material.transparent = !on; m.material.opacity = on?1:0.28;
+  }));
 }
 
 function showMuscleInfo(gid){
